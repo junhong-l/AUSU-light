@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULTS, LightingController, validateSettings } from '../src/lighting.js';
 
-function mockHid({ badResponse = false, shortWrite = false, missing = false } = {}) {
+function mockHid({ badResponse = false, shortWrite = false, shortPowerWrite = false, missing = false } = {}) {
   const calls = [];
   const devices = [
     { vendorId: 0x0b05, productId: 0x19b6, usagePage: 0xff31, usage: 0x76, path: 'keyboard' },
@@ -16,7 +16,7 @@ function mockHid({ badResponse = false, shortWrite = false, missing = false } = 
         calls.push({ operation: 'open', path });
         const write = async (operation, report) => {
           calls.push({ operation, path, report: [...report] });
-          return shortWrite ? 1 : report.length;
+          return shortWrite || (shortPowerWrite && report[1] === 0xbd) ? 1 : report.length;
         };
         return {
           sendFeatureReport: report => write('feature', report),
@@ -44,7 +44,7 @@ test('keyboard uses only verified interfaces and exact report lengths', async ()
   const { calls, controller } = mockHid();
   await controller.apply('keyboard', DEFAULTS.keyboard);
   const reports = calls.filter(call => call.report);
-  assert.equal(reports.length, 7);
+  assert.equal(reports.length, 8);
   assert.ok(reports.every(call => call.report.length === (call.path === 'keyboard' ? 63 : 128)));
   assert.deepEqual(reports[1].report.slice(0, 5), [0x5a, 0xba, 0xc5, 0xc4, 1]);
   assert.deepEqual(reports[4].report.slice(0, 8), [0x5d, 0xb3, 0, 0, 128, 0, 0, 0xeb]);
@@ -63,11 +63,47 @@ test('keyboard animation modes encode mode, speed and breathing flag', async () 
   }
 });
 
-test('keyboard off does not send Aura or Slash commands', async () => {
+test('keyboard off disables all power states without RGB or Slash commands', async () => {
   const { calls, controller } = mockHid();
   await controller.apply('keyboard', { ...DEFAULTS.keyboard, enabled: false });
-  assert.ok(calls.every(call => call.path === 'keyboard'));
   assert.equal(calls.filter(call => call.report)[1].report[4], 0);
+  const aura = calls.filter(call => call.report && call.path === 'aura');
+  assert.equal(aura.length, 1);
+  assert.equal(aura[0].operation, 'output');
+  assert.deepEqual(aura[0].report.slice(0, 8), [0x5d, 0xbd, 1, 0, 0, 0, 0, 0xff]);
+  assert.ok(!calls.some(call => call.path === 'firmware'));
+});
+
+test('keyboard power policy encodes awake and sleep states with the verified report', async () => {
+  for (const sleepOff of [true, false]) {
+    const { calls, controller } = mockHid();
+    await controller.apply('keyboard', { ...DEFAULTS.keyboard, sleepOff });
+    const power = calls.filter(call => call.report?.[1] === 0xbd);
+    assert.equal(power.length, 1);
+    assert.equal(power[0].path, 'aura');
+    assert.equal(power[0].operation, 'output');
+    assert.deepEqual(power[0].report.slice(0, 8), [0x5d, 0xbd, 1, sleepOff ? 0x08 : 0x28, 0, 0, 0, 0xff]);
+    assert.equal(power[0].report.length, 128);
+    assert.ok(power[0].report.slice(8).every(value => value === 0));
+    assert.equal(calls.filter(call => call.report).at(-1), power[0]);
+  }
+});
+
+test('legacy keyboard settings default to sleep off and reject invalid power settings', () => {
+  const legacy = { ...DEFAULTS.keyboard };
+  delete legacy.sleepOff;
+  assert.deepEqual(validateSettings('keyboard', legacy), DEFAULTS.keyboard);
+  for (const sleepOff of [null, 0, 1, 'true', [], {}]) {
+    assert.throws(() => validateSettings('keyboard', { ...legacy, sleepOff }), /Sleep off must be boolean/);
+  }
+  assert.equal(validateSettings('keyboard', { ...legacy, sleepOff: false }).sleepOff, false);
+});
+
+test('short power-policy writes fail and close the Aura handle', async () => {
+  const { calls, controller } = mockHid({ shortPowerWrite: true });
+  await assert.rejects(controller.apply('keyboard', DEFAULTS.keyboard), /Incomplete HID/);
+  assert.equal(calls.filter(call => call.report).at(-1).report[1], 0xbd);
+  assert.deepEqual(calls.at(-1), { operation: 'close', path: 'aura' });
 });
 
 test('Slash preserves other mode slots and uses the tested static sequence', async () => {

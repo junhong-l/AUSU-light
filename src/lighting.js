@@ -2,7 +2,7 @@ export const KEYBOARD_MODES = Object.freeze({ static: 0, breathe: 1, cycle: 2, s
 export const SLASH_MODES = Object.freeze({ static: 0x06, bounce: 0x10, slash: 0x12, loading: 0x13, flow: 0x19, flux: 0x25, spectrum: 0x26 });
 
 export const DEFAULTS = Object.freeze({
-  keyboard: { enabled: true, brightness: 1, color: '#800000', mode: 'static', speed: 1 },
+  keyboard: { enabled: true, brightness: 1, color: '#800000', mode: 'static', speed: 1, sleepOff: true },
   slash: { enabled: true, brightness: 1, mode: 'static', interval: 0 }
 });
 
@@ -18,10 +18,11 @@ export function validateSettings(target, input) {
   if (target === 'keyboard') {
     if (typeof input.color !== 'string' || !/^#[\da-f]{6}$/i.test(input.color)) throw new Error('Invalid RGB color');
     if (!Number.isInteger(input.speed) || input.speed < 0 || input.speed > 2) throw new Error('Speed must be 0-2');
+    if (input.sleepOff !== undefined && typeof input.sleepOff !== 'boolean') throw new Error('Sleep off must be boolean');
   } else if (!Number.isInteger(input.interval) || input.interval < 0 || input.interval > 255) {
     throw new Error('Interval must be 0-255');
   }
-  return Object.fromEntries(keys.map(key => [key, input[key]]));
+  return Object.fromEntries(keys.map(key => [key, input[key] === undefined ? DEFAULTS[target][key] : input[key]]));
 }
 
 export class LightingController {
@@ -81,17 +82,18 @@ export class LightingController {
       await this.#send(handle, [0x5a, ...Buffer.from('ASUS Tech.Inc.', 'ascii')], 63);
       await this.#send(handle, [0x5a, 0xba, 0xc5, 0xc4, settings.enabled ? settings.brightness : 0], 63);
     });
-    if (!settings.enabled) return;
     const color = [1, 3, 5].map(offset => Number.parseInt(settings.color.slice(offset, offset + 2), 16));
     const speed = [0xe1, 0xeb, 0xf5][settings.speed];
     await this.#open(interfaces.aura, async handle => {
-      for (const payload of [
+      if (settings.enabled) for (const payload of [
         [0x5d, 0xb9],
         [0x5d, ...Buffer.from('ASUS Tech.Inc.', 'ascii')],
         [0x5d, 0xb3, 0, KEYBOARD_MODES[settings.mode], ...color, speed, 0, settings.mode === 'breathe' ? 1 : 0, 0, 0, 0],
         [0x5d, 0xb5, 0, 0, 0],
         [0x5d, 0xb4]
       ]) await this.#send(handle, payload, 128, false);
+      const power = settings.enabled ? (settings.sleepOff ? 0x08 : 0x28) : 0;
+      await this.#send(handle, [0x5d, 0xbd, 1, power, 0, 0, 0, 0xff], 128, false);
     });
   }
 

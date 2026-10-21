@@ -220,7 +220,7 @@ function createEffectPicker(target, kind) {
 
 function settingsFor(target) {
   const value = { enabled: element(`${target}-enabled`).checked, brightness: Number(element(`${target}-brightness`).value), mode: element(`${target}-mode`).value };
-  if (target === 'keyboard') Object.assign(value, { color: element('keyboard-color').value, speed: Number(element('keyboard-speed').value) });
+  if (target === 'keyboard') Object.assign(value, { color: element('keyboard-color').value, speed: Number(element('keyboard-speed').value), sleepOff: element('keyboard-sleepOff').checked });
   else value.interval = Number(element('slash-interval').value);
   return value;
 }
@@ -304,7 +304,7 @@ async function refresh({ initial = false } = {}) {
       for (const target of targets) {
         for (const [key, value] of Object.entries(state.settings[target])) {
           const input = element(`${target}-${key}`);
-          if (key === 'enabled') input.checked = value;
+          if (input.type === 'checkbox') input.checked = value;
           else input.value = value;
         }
         preview(target);

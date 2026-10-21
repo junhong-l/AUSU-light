@@ -1,14 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createApplication } from '../src/server.js';
 import { DEFAULTS } from '../src/lighting.js';
 
-async function fixture(context, apply = async () => {}) {
+async function fixture(context, apply = async () => {}, savedSettings) {
   const calls = [];
   const dataDir = await mkdtemp(path.join(tmpdir(), 'asus-light-test-'));
+  if (savedSettings) await writeFile(path.join(dataDir, 'settings.json'), JSON.stringify(savedSettings), 'utf8');
   const controller = {
     inspect: async () => ({ keyboard: true, slash: true }),
     apply: async (target, settings) => { calls.push({ target, settings }); await apply(); }
@@ -52,6 +53,36 @@ test('cross-origin and missing-token requests never reach hardware', async conte
   const stateResponse = await fetch(`${base}/api/state`, { headers: { Origin: 'https://example.com' } });
   assert.equal(stateResponse.status, 403);
   assert.deepEqual(calls, []);
+});
+
+test('legacy saved settings load sleep off without losing settings or writing hardware', async context => {
+  const keyboard = { ...DEFAULTS.keyboard, color: '#123456', brightness: 3 };
+  delete keyboard.sleepOff;
+  const legacy = { keyboard, slash: { ...DEFAULTS.slash, enabled: false } };
+  const { state, calls, dataDir } = await fixture(context, undefined, legacy);
+  assert.deepEqual(state.settings.keyboard, { ...keyboard, sleepOff: true });
+  assert.deepEqual(state.settings.slash, legacy.slash);
+  assert.equal(state.warning, null);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(JSON.parse(await readFile(path.join(dataDir, 'settings.json'), 'utf8')), legacy);
+});
+
+test('sleep policy false survives saving and reloading, invalid values never reach hardware', async context => {
+  const { base, headers, calls, dataDir } = await fixture(context);
+  const keyboard = { ...DEFAULTS.keyboard, sleepOff: false };
+  const response = await fetch(`${base}/api/apply/keyboard`, { method: 'POST', headers, body: JSON.stringify(keyboard) });
+  assert.equal(response.status, 200);
+  assert.deepEqual(calls, [{ target: 'keyboard', settings: keyboard }]);
+  const saved = JSON.parse(await readFile(path.join(dataDir, 'settings.json'), 'utf8'));
+  assert.equal(saved.keyboard.sleepOff, false);
+  const reloaded = await fixture(context, undefined, saved);
+  assert.equal(reloaded.state.settings.keyboard.sleepOff, false);
+  assert.deepEqual(reloaded.calls, []);
+  for (const sleepOff of [null, 0, 'false']) {
+    const invalid = await fetch(`${base}/api/apply/keyboard`, { method: 'POST', headers, body: JSON.stringify({ ...keyboard, sleepOff }) });
+    assert.equal(invalid.status, 400);
+  }
+  assert.equal(calls.length, 1);
 });
 
 test('malformed or unsupported settings do not reach hardware', async context => {
